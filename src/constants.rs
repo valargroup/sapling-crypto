@@ -1,8 +1,6 @@
 //! Various constants used by the Sapling protocol.
 
 use alloc::vec::Vec;
-use ff::PrimeField;
-use group::Group;
 use jubjub::{AffineNielsPoint, ExtendedPoint, SubgroupPoint};
 use lazy_static::lazy_static;
 
@@ -233,48 +231,6 @@ pub const PEDERSEN_HASH_GENERATORS: &[SubgroupPoint] = &[
 /// The maximum number of chunks per segment of the Pedersen hash.
 pub const PEDERSEN_HASH_CHUNKS_PER_GENERATOR: usize = 63;
 
-/// The window size for exponentiation of Pedersen hash generators outside the circuit.
-pub const PEDERSEN_HASH_EXP_WINDOW_SIZE: u32 = 8;
-
-lazy_static! {
-    /// The exp table for [`PEDERSEN_HASH_GENERATORS`].
-    pub static ref PEDERSEN_HASH_EXP_TABLE: Vec<Vec<Vec<SubgroupPoint>>> =
-        generate_pedersen_hash_exp_table();
-}
-
-/// Creates the exp table for the Pedersen hash generators.
-fn generate_pedersen_hash_exp_table() -> Vec<Vec<Vec<SubgroupPoint>>> {
-    let window = PEDERSEN_HASH_EXP_WINDOW_SIZE;
-
-    PEDERSEN_HASH_GENERATORS
-        .iter()
-        .cloned()
-        .map(|mut g| {
-            let mut tables = vec![];
-
-            let mut num_bits = 0;
-            while num_bits <= jubjub::Fr::NUM_BITS {
-                let mut table = Vec::with_capacity(1 << window);
-                let mut base = SubgroupPoint::identity();
-
-                for _ in 0..(1 << window) {
-                    table.push(base);
-                    base += g;
-                }
-
-                tables.push(table);
-                num_bits += window;
-
-                for _ in 0..window {
-                    g = g.double();
-                }
-            }
-
-            tables
-        })
-        .collect()
-}
-
 /// The number of 3-bit chunks folded into a single Pedersen hash table lookup outside the
 /// circuit.
 ///
@@ -407,6 +363,7 @@ fn generate_pedersen_hash_block_table() -> Vec<Vec<Vec<AffineNielsPoint>>> {
 
 #[cfg(test)]
 mod tests {
+    use group::Group;
     use jubjub::SubgroupPoint;
 
     use super::*;

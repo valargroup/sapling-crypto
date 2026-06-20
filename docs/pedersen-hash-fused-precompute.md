@@ -122,9 +122,9 @@ Guards:
   chunk, block, and generator boundaries (including the 6-bit personalization shift) up to the
   six-generator capacity.
 
-The only API change is the return type (see above). The old `PEDERSEN_HASH_EXP_TABLE` /
-`PEDERSEN_HASH_EXP_WINDOW_SIZE` remain exported (they are `pub` in `pub mod constants`); they are
-no longer used by `pedersen_hash` and, being lazily initialised, cost nothing unless referenced.
+Besides the return type (see above), the now-unused exp-window constants
+(`PEDERSEN_HASH_EXP_TABLE`, `PEDERSEN_HASH_EXP_WINDOW_SIZE`, and their builder) were removed from
+`src/constants.rs`.
 
 ## Considered and rejected
 
