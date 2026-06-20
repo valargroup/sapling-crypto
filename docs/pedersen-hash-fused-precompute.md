@@ -39,7 +39,7 @@ addition and precompute without the incomplete-addition constraints the circuit 
 ## Tables
 
 Two lazily-built tables in `src/constants.rs`, parameterised by
-`PEDERSEN_HASH_CHUNKS_PER_BLOCK` (`C`, default 4):
+`PEDERSEN_HASH_CHUNKS_PER_BLOCK` (`C`, default 3):
 
 - **`PEDERSEN_HASH_SINGLE_TABLE[g][j][raw]` = `enc · 2^{4j} · G_g`.**
   Per generator `g` (6), per chunk position `j` (0..63), indexed by the chunk's 3 raw bits
@@ -51,26 +51,27 @@ Two lazily-built tables in `src/constants.rs`, parameterised by
   bits (chunk `k` occupies bits `3k..3k+3`). Built by **summing the relevant single-table
   entries**, so the two tables agree by construction.
 
-Entries are stored as `SubgroupPoint` (matching the previous table) and added with the same
-point addition the old code used, so the speedup comes purely from doing fewer additions and no
-scalar math. (A Niels/mixed-addition representation was evaluated but rejected: jubjub's
-`SubgroupPoint` has no public `From<ExtendedPoint>`, so it would force either a public API
-change or a costly per-hash re-encode.)
+Entries are stored in jubjub's **precomputed-addition (Niels) form, `AffineNielsPoint`**
+(`(v+u, v−u, 2d·u·v)`, 96 bytes vs 160 for an extended point), and the accumulator is a plain
+`ExtendedPoint`. Each table lookup is then a **mixed addition** (7 field multiplications, no `Z`
+on the addend), which is both faster than extended+extended and, crucially, lower-latency on the
+sequential accumulator chain. Tables are built with one batched field inversion per block via
+`jubjub::batch_normalize`, so lazy init stays cheap.
 
 ### Memory / speed tradeoff (`C`)
 
-Measured against the previous 8-bit-window implementation on a 510-bit Merkle hash
-(~20.8 µs baseline), `cargo bench --bench pedersen_hash`:
+Measured against the previous 8-bit-window implementation on a raw 510-bit Pedersen hash
+(~20.8 µs baseline), `cargo bench --bench pedersen_hash` (`pedersen-hash`):
 
 | `C` | time    | speedup | approx. table size |
 |-----|---------|---------|--------------------|
-|  3  | 12.1 µs |  1.72×  |       ~11 MB       |
-|  4  |  8.8 µs |  2.37×  |       ~60 MB       |
-|  5  |  7.2 µs |  2.87×  |      ~380 MB       |
+|  3  |  6.9 µs |  3.0×   |       ~7 MB        |
+|  4  |  5.9 µs |  3.5×   |       ~36 MB       |
+|  5  |  4.9 µs |  4.3×   |      ~227 MB       |
 
-`C = 4` is the default: it clears the >2× goal at moderate RAM. `C` is a one-line constant, so
-the operating point can be retuned later. Larger `C` gives diminishing returns for rapidly
-growing memory and lazy-init cost.
+`C = 3` is the default: ~3× at roughly the original exp-table's memory footprint. `C` is a
+one-line constant, so the operating point can be retuned later. Larger `C` gives diminishing
+returns for rapidly growing memory and lazy-init cost.
 
 ## Algorithm (`pedersen_hash`)
 
@@ -78,11 +79,27 @@ The input bit stream (personalization bits prepended) is buffered into a `Vec<bo
 exact chunk count `T = ⌈len/3⌉` is known up front. The hash then walks chunks segment by
 segment (`PEDERSEN_HASH_CHUNKS_PER_GENERATOR = 63` chunks per generator):
 
-- Fold every full block of `C` chunks with one `PEDERSEN_HASH_BLOCK_TABLE` lookup + add.
+- Fold every full block of `C` chunks with one `PEDERSEN_HASH_BLOCK_TABLE` lookup + mixed add.
 - Add any leftover chunks (the `63 mod C` tail of a segment, or the final partial segment) one
   at a time via `PEDERSEN_HASH_SINGLE_TABLE`.
 
-For `C = 4` this is ~49 point additions per Merkle hash (vs ~96), with no `Fr` arithmetic.
+For `C = 3` this is ~58 mixed additions per Merkle hash (vs ~96 full additions + the whole `Fr`
+accumulation in the old code); `C = 4` drops it to ~49.
+
+## Point representation & return type (breaking change)
+
+To use the fast mixed addition the accumulator must be an `ExtendedPoint`, and there is no cheap
+`ExtendedPoint → SubgroupPoint` conversion in jubjub (only via `to_affine()`, a field
+inversion). Rather than pay an inversion on every hash, **`pedersen_hash` now returns
+`jubjub::ExtendedPoint`** instead of `SubgroupPoint`. This is a public API change.
+
+Caller impact is small:
+
+- `tree.rs` (`merkle_hash_field`) and the circuit's witness/test sites already wrapped the result
+  in `ExtendedPoint::from(...)`; that wrap is now the identity and was removed.
+- `spec.rs::windowed_pedersen_commit` (the note commitment, computed once per note — off the hot
+  path) re-wraps the result into a `SubgroupPoint` with a single affine conversion, preserving its
+  signature and everything downstream of it.
 
 ## Correctness
 
@@ -105,9 +122,21 @@ Guards:
   chunk, block, and generator boundaries (including the 6-bit personalization shift) up to the
   six-generator capacity.
 
-The public API is unchanged. The old `PEDERSEN_HASH_EXP_TABLE` / `PEDERSEN_HASH_EXP_WINDOW_SIZE`
-remain exported (they are `pub` in `pub mod constants`) to avoid a breaking change; they are no
-longer used by `pedersen_hash` and, being lazily initialised, cost nothing unless referenced.
+The only API change is the return type (see above). The old `PEDERSEN_HASH_EXP_TABLE` /
+`PEDERSEN_HASH_EXP_WINDOW_SIZE` remain exported (they are `pub` in `pub mod constants`); they are
+no longer used by `pedersen_hash` and, being lazily initialised, cost nothing unless referenced.
+
+## Considered and rejected
+
+- **Sign-symmetry (negation) half-table.** Flipping every chunk's sign bit negates the block sum,
+  so half of each block table is redundant; storing half and conditionally negating at lookup
+  halves memory. Measured, it **regressed speed ~34%** (at `C = 4`, 8.8 → 11.8 µs): the
+  conditional negate lands on the sequential accumulator dependency chain and its latency
+  outweighs the cache win. Kept full tables. (It remains a viable *memory-only* lever if a
+  deployment ever becomes memory-bound.)
+- **GLV.** Not applicable: jubjub has no efficient GLV endomorphism (its only endomorphism is
+  `[−1]`, i.e. the negation above), and the hash is now a sum of precomputed table points rather
+  than a scalar multiplication, so there is no scalar for GLV to decompose.
 
 ## Out of scope
 

@@ -230,21 +230,19 @@ mod test {
 
                 assert!(cs.is_satisfied());
 
-                let expected = jubjub::ExtendedPoint::from(pedersen_hash::pedersen_hash(
+                let expected = pedersen_hash::pedersen_hash(
                     Personalization::MerkleTree(1),
                     input.clone().into_iter(),
-                ))
+                )
                 .to_affine();
 
                 assert_eq!(res.get_u().get_value().unwrap(), expected.get_u());
                 assert_eq!(res.get_v().get_value().unwrap(), expected.get_v());
 
                 // Test against the output of a different personalization
-                let unexpected = jubjub::ExtendedPoint::from(pedersen_hash::pedersen_hash(
-                    Personalization::MerkleTree(0),
-                    input.into_iter(),
-                ))
-                .to_affine();
+                let unexpected =
+                    pedersen_hash::pedersen_hash(Personalization::MerkleTree(0), input.into_iter())
+                        .to_affine();
 
                 assert!(res.get_u().get_value().unwrap() != unexpected.get_u());
                 assert!(res.get_v().get_value().unwrap() != unexpected.get_v());

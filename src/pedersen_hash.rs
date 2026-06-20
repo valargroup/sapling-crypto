@@ -4,7 +4,6 @@
 pub(crate) mod test_vectors;
 
 use alloc::vec::Vec;
-use group::Group;
 
 use super::constants::{PEDERSEN_HASH_CHUNKS_PER_BLOCK, PEDERSEN_HASH_CHUNKS_PER_GENERATOR};
 
@@ -27,7 +26,7 @@ impl Personalization {
     }
 }
 
-pub fn pedersen_hash<I>(personalization: Personalization, bits: I) -> jubjub::SubgroupPoint
+pub fn pedersen_hash<I>(personalization: Personalization, bits: I) -> jubjub::ExtendedPoint
 where
     I: IntoIterator<Item = bool>,
 {
@@ -44,7 +43,9 @@ where
     let block_tables = &*crate::constants::PEDERSEN_HASH_BLOCK_TABLE;
     let single_tables = &*crate::constants::PEDERSEN_HASH_SINGLE_TABLE;
 
-    let mut result = jubjub::SubgroupPoint::identity();
+    // The table entries are precomputed-addition (Niels) points; accumulate into an extended
+    // point via fast mixed additions.
+    let mut result = jubjub::ExtendedPoint::identity();
 
     // Walk the chunks segment by segment (one generator per segment of
     // `PEDERSEN_HASH_CHUNKS_PER_GENERATOR` chunks), accumulating each chunk's precomputed
@@ -117,11 +118,7 @@ pub mod test {
             // The 6 bits prefix is handled separately
             assert_eq!(v.personalization.get_bits(), &input_bools[..6]);
 
-            let p = jubjub::ExtendedPoint::from(pedersen_hash(
-                v.personalization,
-                input_bools.into_iter().skip(6),
-            ))
-            .to_affine();
+            let p = pedersen_hash(v.personalization, input_bools.into_iter().skip(6)).to_affine();
 
             assert_eq!(p.get_u().to_string(), v.hash_u);
             assert_eq!(p.get_v().to_string(), v.hash_v);
@@ -133,7 +130,7 @@ pub mod test {
     fn reference_pedersen_hash(
         personalization: Personalization,
         input: &[bool],
-    ) -> jubjub::SubgroupPoint {
+    ) -> jubjub::ExtendedPoint {
         use core::ops::AddAssign;
         use ff::Field;
 
@@ -141,7 +138,7 @@ pub mod test {
             .get_bits()
             .into_iter()
             .chain(input.iter().copied());
-        let mut result = jubjub::SubgroupPoint::identity();
+        let mut result = jubjub::ExtendedPoint::identity();
         let mut generators = crate::constants::PEDERSEN_HASH_GENERATORS.iter();
 
         loop {

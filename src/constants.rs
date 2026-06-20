@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use ff::PrimeField;
 use group::Group;
-use jubjub::SubgroupPoint;
+use jubjub::{AffineNielsPoint, ExtendedPoint, SubgroupPoint};
 use lazy_static::lazy_static;
 
 /// First 64 bytes of the BLAKE2s input during group hash.
@@ -285,17 +285,18 @@ fn generate_pedersen_hash_exp_table() -> Vec<Vec<Vec<SubgroupPoint>>> {
 /// not fill a whole block fall back to single-chunk lookups via [`PEDERSEN_HASH_SINGLE_TABLE`].
 ///
 /// Larger values trade memory for fewer point additions. Measured against the previous 8-bit
-/// exp-window implementation on a 510-bit Merkle hash (~21 us baseline):
+/// exp-window implementation on a raw 510-bit Pedersen hash (~21 us baseline); table entries are
+/// stored in jubjub's precomputed-addition ([`AffineNielsPoint`]) form (96 bytes each):
 ///
 /// | value | speedup | approx. table size |
 /// |-------|---------|--------------------|
-/// |   3   |  ~1.7x  |       ~11 MB       |
-/// |   4   |  ~2.4x  |       ~60 MB       |
-/// |   5   |  ~2.9x  |      ~380 MB       |
+/// |   3   |  ~3.0x  |       ~7 MB        |
+/// |   4   |  ~3.5x  |       ~36 MB       |
+/// |   5   |  ~4.3x  |      ~227 MB       |
 ///
-/// `4` is the default: it clears a 2x speedup at moderate memory. The tables are built lazily
-/// on first use.
-pub const PEDERSEN_HASH_CHUNKS_PER_BLOCK: usize = 4;
+/// `3` is the default: it delivers ~3x at roughly the original exp-table's memory footprint.
+/// Larger values buy modest extra speed for rapidly growing tables. Built lazily on first use.
+pub const PEDERSEN_HASH_CHUNKS_PER_BLOCK: usize = 3;
 
 lazy_static! {
     /// Per-generator, per-chunk-position precomputed Pedersen hash points.
@@ -304,7 +305,10 @@ lazy_static! {
     /// `g`-th [`PEDERSEN_HASH_GENERATORS`], `j` is the chunk's position within the segment, and
     /// `raw = a | b << 1 | c << 2` are the chunk's three bits encoding
     /// `enc = (1 - 2c) * (1 + a + 2b)`. Used for trailing chunks that do not fill a block.
-    pub static ref PEDERSEN_HASH_SINGLE_TABLE: Vec<Vec<[SubgroupPoint; 8]>> =
+    ///
+    /// Stored as [`AffineNielsPoint`] for fast mixed addition into the [`ExtendedPoint`]
+    /// accumulator.
+    pub static ref PEDERSEN_HASH_SINGLE_TABLE: Vec<Vec<[AffineNielsPoint; 8]>> =
         generate_pedersen_hash_single_table();
 
     /// Per-generator, per-block precomputed Pedersen hash points.
@@ -312,19 +316,20 @@ lazy_static! {
     /// `PEDERSEN_HASH_BLOCK_TABLE[g][b][raw]` is the summed contribution of the
     /// [`PEDERSEN_HASH_CHUNKS_PER_BLOCK`] chunks starting at position `b * PEDERSEN_HASH_CHUNKS_PER_BLOCK`
     /// within segment `g`, indexed by their concatenated raw bits (chunk `k` occupies bits
-    /// `3k..3k + 3`). Built from [`PEDERSEN_HASH_SINGLE_TABLE`] so the two agree by construction.
-    pub static ref PEDERSEN_HASH_BLOCK_TABLE: Vec<Vec<Vec<SubgroupPoint>>> =
+    /// `3k..3k + 3`). Built from the same per-chunk multiples as [`PEDERSEN_HASH_SINGLE_TABLE`]
+    /// so the two agree by construction, and likewise stored as [`AffineNielsPoint`].
+    pub static ref PEDERSEN_HASH_BLOCK_TABLE: Vec<Vec<Vec<AffineNielsPoint>>> =
         generate_pedersen_hash_block_table();
 }
 
-/// Builds [`PEDERSEN_HASH_SINGLE_TABLE`].
-fn generate_pedersen_hash_single_table() -> Vec<Vec<[SubgroupPoint; 8]>> {
+/// The per-generator, per-position multiples `enc * 2^{4j} * G` as extended points, indexed by
+/// `raw = a | b << 1 | c << 2`. Shared by both table builders.
+fn pedersen_hash_single_extended() -> Vec<Vec<[ExtendedPoint; 8]>> {
     PEDERSEN_HASH_GENERATORS
         .iter()
-        .cloned()
         .map(|g| {
             // `base` tracks 2^{4j} * G as `j` advances.
-            let mut base = g;
+            let mut base = ExtendedPoint::from(*g);
 
             (0..PEDERSEN_HASH_CHUNKS_PER_GENERATOR)
                 .map(|_| {
@@ -344,10 +349,35 @@ fn generate_pedersen_hash_single_table() -> Vec<Vec<[SubgroupPoint; 8]>> {
         .collect()
 }
 
-/// Builds [`PEDERSEN_HASH_BLOCK_TABLE`] by summing the relevant [`PEDERSEN_HASH_SINGLE_TABLE`]
-/// entries for each block.
-fn generate_pedersen_hash_block_table() -> Vec<Vec<Vec<SubgroupPoint>>> {
-    let single = &*PEDERSEN_HASH_SINGLE_TABLE;
+/// Converts extended points into the precomputed-addition form used by the lookup tables, using
+/// a single batched field inversion ([`jubjub::batch_normalize`]).
+fn to_niels(mut points: Vec<ExtendedPoint>) -> Vec<AffineNielsPoint> {
+    jubjub::batch_normalize(&mut points)
+        .map(|affine| affine.to_niels())
+        .collect()
+}
+
+/// Builds [`PEDERSEN_HASH_SINGLE_TABLE`].
+fn generate_pedersen_hash_single_table() -> Vec<Vec<[AffineNielsPoint; 8]>> {
+    pedersen_hash_single_extended()
+        .iter()
+        .map(|generator| {
+            generator
+                .iter()
+                .map(|entries| {
+                    to_niels(entries.to_vec())
+                        .try_into()
+                        .expect("exactly 8 entries per chunk position")
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Builds [`PEDERSEN_HASH_BLOCK_TABLE`] by summing the relevant per-chunk multiples for each
+/// block.
+fn generate_pedersen_hash_block_table() -> Vec<Vec<Vec<AffineNielsPoint>>> {
+    let single = pedersen_hash_single_extended();
     let chunks_per_block = PEDERSEN_HASH_CHUNKS_PER_BLOCK;
     let blocks_per_generator = PEDERSEN_HASH_CHUNKS_PER_GENERATOR / chunks_per_block;
     let entries_per_block = 1usize << (3 * chunks_per_block);
@@ -358,16 +388,17 @@ fn generate_pedersen_hash_block_table() -> Vec<Vec<Vec<SubgroupPoint>>> {
             (0..blocks_per_generator)
                 .map(|block| {
                     let first_chunk = block * chunks_per_block;
-                    (0..entries_per_block)
+                    let sums: Vec<ExtendedPoint> = (0..entries_per_block)
                         .map(|raw| {
-                            let mut acc = SubgroupPoint::identity();
+                            let mut acc = ExtendedPoint::identity();
                             for k in 0..chunks_per_block {
                                 let chunk_bits = (raw >> (3 * k)) & 0b111;
                                 acc += generator[first_chunk + k][chunk_bits];
                             }
                             acc
                         })
-                        .collect()
+                        .collect();
+                    to_niels(sums)
                 })
                 .collect()
         })
