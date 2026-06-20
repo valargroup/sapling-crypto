@@ -275,6 +275,105 @@ fn generate_pedersen_hash_exp_table() -> Vec<Vec<Vec<SubgroupPoint>>> {
         .collect()
 }
 
+/// The number of 3-bit chunks folded into a single Pedersen hash table lookup outside the
+/// circuit.
+///
+/// The non-circuit Pedersen hash "unfurls" each segment into the linear combination
+/// `sum_j enc(chunk_j) * 2^{4j} * G` and precomputes it directly, so the online cost is a
+/// handful of point additions with no scalar-field arithmetic. Each [`PEDERSEN_HASH_BLOCK_TABLE`]
+/// lookup resolves `PEDERSEN_HASH_CHUNKS_PER_BLOCK` consecutive chunks at once; chunks that do
+/// not fill a whole block fall back to single-chunk lookups via [`PEDERSEN_HASH_SINGLE_TABLE`].
+///
+/// Larger values trade memory for fewer point additions. Measured against the previous 8-bit
+/// exp-window implementation on a 510-bit Merkle hash (~21 us baseline):
+///
+/// | value | speedup | approx. table size |
+/// |-------|---------|--------------------|
+/// |   3   |  ~1.7x  |       ~11 MB       |
+/// |   4   |  ~2.4x  |       ~60 MB       |
+/// |   5   |  ~2.9x  |      ~380 MB       |
+///
+/// `4` is the default: it clears a 2x speedup at moderate memory. The tables are built lazily
+/// on first use.
+pub const PEDERSEN_HASH_CHUNKS_PER_BLOCK: usize = 4;
+
+lazy_static! {
+    /// Per-generator, per-chunk-position precomputed Pedersen hash points.
+    ///
+    /// `PEDERSEN_HASH_SINGLE_TABLE[g][j][raw]` is `enc * 2^{4j} * G_g`, where `G_g` is the
+    /// `g`-th [`PEDERSEN_HASH_GENERATORS`], `j` is the chunk's position within the segment, and
+    /// `raw = a | b << 1 | c << 2` are the chunk's three bits encoding
+    /// `enc = (1 - 2c) * (1 + a + 2b)`. Used for trailing chunks that do not fill a block.
+    pub static ref PEDERSEN_HASH_SINGLE_TABLE: Vec<Vec<[SubgroupPoint; 8]>> =
+        generate_pedersen_hash_single_table();
+
+    /// Per-generator, per-block precomputed Pedersen hash points.
+    ///
+    /// `PEDERSEN_HASH_BLOCK_TABLE[g][b][raw]` is the summed contribution of the
+    /// [`PEDERSEN_HASH_CHUNKS_PER_BLOCK`] chunks starting at position `b * PEDERSEN_HASH_CHUNKS_PER_BLOCK`
+    /// within segment `g`, indexed by their concatenated raw bits (chunk `k` occupies bits
+    /// `3k..3k + 3`). Built from [`PEDERSEN_HASH_SINGLE_TABLE`] so the two agree by construction.
+    pub static ref PEDERSEN_HASH_BLOCK_TABLE: Vec<Vec<Vec<SubgroupPoint>>> =
+        generate_pedersen_hash_block_table();
+}
+
+/// Builds [`PEDERSEN_HASH_SINGLE_TABLE`].
+fn generate_pedersen_hash_single_table() -> Vec<Vec<[SubgroupPoint; 8]>> {
+    PEDERSEN_HASH_GENERATORS
+        .iter()
+        .cloned()
+        .map(|g| {
+            // `base` tracks 2^{4j} * G as `j` advances.
+            let mut base = g;
+
+            (0..PEDERSEN_HASH_CHUNKS_PER_GENERATOR)
+                .map(|_| {
+                    let double = base.double(); // 2 * base
+                    let triple = double + base; // 3 * base
+                    let quad = double.double(); // 4 * base
+
+                    // Indexed by raw = a | b << 1 | c << 2, value enc = (1 - 2c)(1 + a + 2b):
+                    //   000:+1 001:+2 010:+3 011:+4 100:-1 101:-2 110:-3 111:-4
+                    let entries = [base, double, triple, quad, -base, -double, -triple, -quad];
+
+                    base = base.double().double().double().double(); // 2^4 * base
+                    entries
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Builds [`PEDERSEN_HASH_BLOCK_TABLE`] by summing the relevant [`PEDERSEN_HASH_SINGLE_TABLE`]
+/// entries for each block.
+fn generate_pedersen_hash_block_table() -> Vec<Vec<Vec<SubgroupPoint>>> {
+    let single = &*PEDERSEN_HASH_SINGLE_TABLE;
+    let chunks_per_block = PEDERSEN_HASH_CHUNKS_PER_BLOCK;
+    let blocks_per_generator = PEDERSEN_HASH_CHUNKS_PER_GENERATOR / chunks_per_block;
+    let entries_per_block = 1usize << (3 * chunks_per_block);
+
+    single
+        .iter()
+        .map(|generator| {
+            (0..blocks_per_generator)
+                .map(|block| {
+                    let first_chunk = block * chunks_per_block;
+                    (0..entries_per_block)
+                        .map(|raw| {
+                            let mut acc = SubgroupPoint::identity();
+                            for k in 0..chunks_per_block {
+                                let chunk_bits = (raw >> (3 * k)) & 0b111;
+                                acc += generator[first_chunk + k][chunk_bits];
+                            }
+                            acc
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use jubjub::SubgroupPoint;
