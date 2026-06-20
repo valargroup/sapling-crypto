@@ -39,7 +39,7 @@ addition and precompute without the incomplete-addition constraints the circuit 
 ## Tables
 
 Two lazily-built tables in `src/constants.rs`, parameterised by
-`PEDERSEN_HASH_CHUNKS_PER_BLOCK` (`C`, default 3):
+`PEDERSEN_HASH_CHUNKS_PER_BLOCK` (`C`, default 2):
 
 - **`PEDERSEN_HASH_SINGLE_TABLE[g][j][raw]` = `enc · 2^{4j} · G_g`.**
   Per generator `g` (6), per chunk position `j` (0..63), indexed by the chunk's 3 raw bits
@@ -65,13 +65,14 @@ Measured against the previous 8-bit-window implementation on a raw 510-bit Peder
 
 | `C` | time    | speedup | approx. table size |
 |-----|---------|---------|--------------------|
+|  2  | 10.2 µs |  2.0×   |       ~1.4 MB      |
 |  3  |  6.9 µs |  3.0×   |       ~7 MB        |
 |  4  |  5.9 µs |  3.5×   |       ~36 MB       |
 |  5  |  4.9 µs |  4.3×   |      ~227 MB       |
 
-`C = 3` is the default: ~3× at roughly the original exp-table's memory footprint. `C` is a
-one-line constant, so the operating point can be retuned later. Larger `C` gives diminishing
-returns for rapidly growing memory and lazy-init cost.
+`C = 2` is the default: ~2× at the smallest memory footprint (below the original exp-table's).
+`C` is a one-line constant, so the operating point can be retuned later. Larger `C` gives
+diminishing returns for rapidly growing memory and lazy-init cost.
 
 ## Algorithm (`pedersen_hash`)
 
@@ -83,8 +84,8 @@ segment (`PEDERSEN_HASH_CHUNKS_PER_GENERATOR = 63` chunks per generator):
 - Add any leftover chunks (the `63 mod C` tail of a segment, or the final partial segment) one
   at a time via `PEDERSEN_HASH_SINGLE_TABLE`.
 
-For `C = 3` this is ~58 mixed additions per Merkle hash (vs ~96 full additions + the whole `Fr`
-accumulation in the old code); `C = 4` drops it to ~49.
+For `C = 2` this is ~87 mixed additions per Merkle hash (vs ~96 full additions + the whole `Fr`
+accumulation in the old code); `C = 3` drops it to ~58 and `C = 4` to ~49.
 
 ## Point representation & return type (breaking change)
 

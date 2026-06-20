@@ -18,7 +18,8 @@ and this library adheres to Rust's notion of
   `jubjub::ExtendedPoint` instead of a `jubjub::SubgroupPoint`. The returned
   point is still in the prime-order subgroup; callers that need a
   `SubgroupPoint` can re-derive one (e.g. via `to_bytes`/`from_bytes`). This
-  backs a faster precomputation-based implementation (~3x on a Merkle hash).
+  backs a faster precomputation-based implementation (~2x at the default
+  `PEDERSEN_HASH_CHUNKS_PER_BLOCK`, tunable for more speed at higher memory).
 
 ### Removed
 - `sapling_crypto::constants::PEDERSEN_HASH_EXP_TABLE`

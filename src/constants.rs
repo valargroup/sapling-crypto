@@ -246,13 +246,15 @@ pub const PEDERSEN_HASH_CHUNKS_PER_GENERATOR: usize = 63;
 ///
 /// | value | speedup | approx. table size |
 /// |-------|---------|--------------------|
+/// |   2   |  ~2.0x  |       ~1.4 MB      |
 /// |   3   |  ~3.0x  |       ~7 MB        |
 /// |   4   |  ~3.5x  |       ~36 MB       |
 /// |   5   |  ~4.3x  |      ~227 MB       |
 ///
-/// `3` is the default: it delivers ~3x at roughly the original exp-table's memory footprint.
-/// Larger values buy modest extra speed for rapidly growing tables. Built lazily on first use.
-pub const PEDERSEN_HASH_CHUNKS_PER_BLOCK: usize = 3;
+/// `2` is the default: it delivers ~2x at the smallest memory footprint (below the original
+/// exp-table's). Larger values buy more speed for rapidly growing tables. Built lazily on first
+/// use.
+pub const PEDERSEN_HASH_CHUNKS_PER_BLOCK: usize = 2;
 
 lazy_static! {
     /// Per-generator, per-chunk-position precomputed Pedersen hash points.
